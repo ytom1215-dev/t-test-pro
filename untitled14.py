@@ -1,180 +1,258 @@
 import streamlit as st
 import pandas as pd
 from scipy import stats
+import matplotlib.pyplot as plt
+import seaborn as sns
+import japanize_matplotlib
+import io
+
+# ファイルの読み込みをキャッシュ化
+@st.cache_data
+def load_data(file):
+    if file.name.endswith('.csv'):
+        return pd.read_csv(file)
+    else:
+        return pd.read_excel(file)
 
 def main():
     st.set_page_config(page_title="t検定アプリ", layout="centered")
-    st.title("📊 独立した2群のt検定アプリ")
+    st.title("📊 2群のt検定アプリ")
+    
+    # サイドバーに設定を配置
+    st.sidebar.header("⚙️ 検定の基本設定")
+    is_paired_str = st.sidebar.radio(
+        "データの「対応」の有無",
+        ["対応なし（独立2群・別区画など）", "対応あり（同一区画の前後比較など）"],
+        help="異なるグループを比較する場合は「対応なし」、同じ対象の処理前・処理後などを比較する場合は「対応あり」を選びます。"
+    )
+    is_paired = is_paired_str == "対応あり（同一区画の前後比較など）"
 
-    # タブの作成（3つに増加）
     tab1, tab2, tab3 = st.tabs(["📊 検定アプリ", "📖 用語・理論の解説", "📗 Excelでの計算方法"])
-
+    
     # ==========================================
-    # タブ1: 検定アプリのメイン機能
+    # タブ1: 検定アプリ本体
     # ==========================================
     with tab1:
         st.subheader("📂 データの準備")
+
+        input_method = st.radio(
+            "データの入力方法を選んでください", 
+            ["📋 Excelから直接コピペ (おすすめ)", "📥 ファイルをアップロード", "🌱 サンプルデータで試す"], 
+            horizontal=True
+        )
         
-        # サンプルデータの定義
-        samples = {
-            "自分で入力 (Excelからコピペ用)": pd.DataFrame({
-                "グループA": [None] * 10,
-                "グループB": [None] * 10
-            }),
-            "サンプル1: 有意差があるデータ (例: 新薬と偽薬)": pd.DataFrame({
-                "グループA": [65, 68, 70, 72, 69, 75, 67, 71, 73, 66],
-                "グループB": [55, 58, 54, 60, 57, 52, 59, 56, 61, 53]
-            }),
-            "サンプル2: 有意差がないデータ (例: 従来法AとB)": pd.DataFrame({
-                "グループA": [60, 62, 58, 65, 61, 59, 63, 64, 57, 60],
-                "グループB": [61, 63, 59, 64, 62, 60, 65, 63, 58, 61]
-            })
-        }
-
-        # データソースの選択
-        selected_option = st.selectbox("データソースを選択してください", list(samples.keys()))
-        st.markdown("※ 下の表のセルをクリックして「**Ctrl+V (Cmd+V)**」で直接上書き貼り付けすることも可能です。")
-
-        # データエディタの表示
-        edited_df = st.data_editor(samples[selected_option], num_rows="dynamic", use_container_width=True)
-
-        st.divider()
-
-        # 検定のオプション設定
-        st.subheader("⚙️ 検定の設定")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            test_type = st.radio(
-                "t検定の種類",
-                ["スチューデントのt検定 (等分散を仮定)", "ウェルチのt検定 (等分散を仮定しない)"],
-                index=1 # デフォルトはウェルチ
+        df_input = pd.DataFrame()
+        
+        # --------------------------------------------------
+        # 入力パターンの処理
+        # --------------------------------------------------
+        if input_method == "📋 Excelから直接コピペ (おすすめ)":
+            pasted_text = st.text_area(
+                "Excelから2つのグループのデータ（2列分）をコピーして、ここに貼り付けてください。\n※1行目はグループ名（列名）として認識されます。", 
+                height=150,
+                placeholder="ここに Ctrl+V (Macは Cmd+V) で貼り付け"
             )
-            is_equal_var = (test_type == "スチューデントのt検定 (等分散を仮定)")
-
-        with col2:
-            tail_type = st.radio(
-                "両側 / 片側",
-                ["両側検定", "片側検定 (A > B)", "片側検定 (A < B)"]
-            )
-            if tail_type == "両側検定":
-                alt = "two-sided"
-            elif tail_type == "片側検定 (A > B)":
-                alt = "greater"
+            if pasted_text:
+                try:
+                    df_raw = pd.read_csv(io.StringIO(pasted_text), sep='\t')
+                    if len(df_raw.columns) >= 2:
+                        df_input = pd.DataFrame({"グループA": df_raw.iloc[:, 0], "グループB": df_raw.iloc[:, 1]})
+                        st.success("📋 コピペデータを読み込みました！")
+                    else:
+                        st.warning("データが2列以上ありません。")
+                        df_input = pd.DataFrame({"グループA": pd.Series(dtype="float"), "グループB": pd.Series(dtype="float")})
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {e}")
+                    df_input = pd.DataFrame({"グループA": pd.Series(dtype="float"), "グループB": pd.Series(dtype="float")})
             else:
-                alt = "less"
+                df_input = pd.DataFrame({"グループA": pd.Series([None] * 10, dtype="float"), "グループB": pd.Series([None] * 10, dtype="float")})
 
-        # 検定の実行
-        if st.button("🚀 検定を実行", type="primary"):
-            group_a = pd.to_numeric(edited_df["グループA"], errors='coerce').dropna()
-            group_b = pd.to_numeric(edited_df["グループB"], errors='coerce').dropna()
-
-            if len(group_a) < 2 or len(group_b) < 2:
-                st.error("エラー：各グループに少なくとも2つ以上の数値を入力してください。")
+        elif input_method == "📥 ファイルをアップロード":
+            uploaded_file = st.file_uploader("Excelファイル (.xlsx) または CSVファイル (.csv)", type=["xlsx", "xls", "csv"])
+            if uploaded_file is None:
+                df_input = pd.DataFrame({"グループA": pd.Series([None] * 10, dtype="float"), "グループB": pd.Series([None] * 10, dtype="float")})
             else:
                 try:
-                    result = stats.ttest_ind(a=group_a, b=group_b, equal_var=is_equal_var, alternative=alt)
-
-                    st.divider()
-                    st.subheader("📝 分析結果")
-                    
-                    st.markdown("**【基本統計量】**")
-                    stats_df = pd.DataFrame({
-                        "データ数": [len(group_a), len(group_b)],
-                        "平均値": [group_a.mean(), group_b.mean()],
-                        "標準偏差": [group_a.std(ddof=1), group_b.std(ddof=1)]
-                    }, index=["グループA", "グループB"])
-                    st.dataframe(stats_df)
-
-                    st.markdown("**【検定結果】**")
-                    res_col1, res_col2 = st.columns(2)
-                    res_col1.metric("t値", f"{result.statistic:.4f}")
-                    res_col2.metric("p値", f"{result.pvalue:.4e}")
-
-                    alpha = 0.05
-                    if result.pvalue < alpha:
-                        st.success(f"**結論:** 有意水準 {alpha*100}% で**有意差があります**。(p < 0.05)")
+                    df_raw = load_data(uploaded_file)
+                    if len(df_raw.columns) >= 2:
+                        df_input = pd.DataFrame({"グループA": df_raw.iloc[:, 0], "グループB": df_raw.iloc[:, 1]})
+                        st.success(f"📄 「{uploaded_file.name}」を読み込みました！")
                     else:
-                        st.info(f"**結論:** 有意水準 {alpha*100}% で**有意差は認められませんでした**。(p >= 0.05)")
-
+                        st.warning("データが2列以上ありません。")
+                        df_input = pd.DataFrame({"グループA": pd.Series(dtype="float"), "グループB": pd.Series(dtype="float")})
                 except Exception as e:
-                    st.error(f"計算中にエラーが発生しました: {e}")
+                    st.error(f"エラーが発生しました: {e}")
+                    df_input = pd.DataFrame({"グループA": pd.Series(dtype="float"), "グループB": pd.Series(dtype="float")})
+
+        else:
+            if is_paired:
+                st.info("💡 **サンプルデータ（対応あり）**\n\n「同一区画」における処理前と処理後の数値を比較します。")
+                df_input = pd.DataFrame({
+                    "処理前": pd.Series([12.5, 13.0, 11.8, 14.2, 12.1] + [None]*5, dtype="float"),
+                    "処理後": pd.Series([15.2, 14.8, 14.0, 16.5, 15.0] + [None]*5, dtype="float")
+                })
+            else:
+                st.info("💡 **サンプルデータ（対応なし）**\n\n「新しい肥料をまいた5区画」と「従来のまま（肥料なし）の5区画」の収量（kg）を比較します。")
+                df_input = pd.DataFrame({
+                    "肥料あり (処理)": pd.Series([150, 130, 180, 160, 170] + [None]*5, dtype="float"),
+                    "肥料なし (未処理)": pd.Series([200, 250, 220, 230, 190] + [None]*5, dtype="float")
+                })
+
+        edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True)
+        st.divider()
+        
+        # ==========================================
+        # 検定の実行セクション
+        # ==========================================
+        st.subheader("⚙️ 検定の実行")
+        
+        col_names = edited_df.columns.tolist()
+        col_a_name = col_names[0] if len(col_names) > 0 else "グループA"
+        col_b_name = col_names[1] if len(col_names) > 1 else "グループB"
+        
+        # データのクレンジング（対応の有無で処理を変える）
+        if is_paired:
+            st.info("※ 「対応あり」の場合、ペアになっていない（片方が空欄の）行は計算から自動的に除外されます。")
+            clean_df = edited_df.dropna(subset=[col_a_name, col_b_name])
+            group_a = clean_df[col_a_name].values
+            group_b = clean_df[col_b_name].values
+        else:
+            group_a = edited_df[col_a_name].dropna().values
+            group_b = edited_df[col_b_name].dropna().values
+        
+        # 対応なしの場合のみ、等分散の仮定オプションを表示
+        assume_equal_var = False
+        if not is_paired:
+            assume_equal_var = st.checkbox(
+                "2群の分散が等しいと仮定する（Studentのt検定を適用）", 
+                value=False,
+                help="等分散性の検定結果で「等分散とみなせる」場合のみチェックを入れます。現代統計学では常にチェックを外してWelchのt検定を行うのが主流です。"
+            )
+        
+        if st.button("検定を実行する", type="primary"):
+            if len(group_a) < 2 or len(group_b) < 2:
+                st.error("⚠️ 検定を実行するには、各グループに少なくとも2つ以上のデータが必要です。")
+            else:
+                # ------------------------------------------
+                # 1. 対応なしの場合のみ、等分散性の検定 (Levene検定) を実行
+                # ------------------------------------------
+                if not is_paired:
+                    st.subheader("🔍 1. 前提条件の確認（等分散性の検定）")
+                    levene_stat, levene_p = stats.levene(group_a, group_b)
+                    
+                    st.caption("適用した手法: **Levene（ルビーン）検定**")
+                    l_col1, l_col2 = st.columns(2)
+                    l_col1.metric(label="検定統計量", value=f"{levene_stat:.4f}")
+                    l_col2.metric(label="p値", value=f"{levene_p:.4f}")
+                    
+                    if levene_p < 0.05:
+                        st.warning("⚠️ **p < 0.05** です。\n\n2つのグループのばらつき（分散）には**有意な差があります**。Studentのt検定は適さないため、設定のチェックを外して**Welchのt検定**を実行してください。")
+                    else:
+                        st.success("✅ **p ≥ 0.05** です。\n\n2つのグループのばらつき（分散）に**有意な差は認められません（等分散とみなせます）**。設定にチェックを入れて**Studentのt検定**を実行しても構いません。")
+                    
+                    st.info("※ 補足: 近年の統計学では、事前の等分散検定を行わず、最初から外れ値や非等分散に強い「Welchのt検定」を実施することが推奨されています。")
+                    st.divider()
+
+                # ------------------------------------------
+                # 2. t検定の実行
+                # ------------------------------------------
+                st.subheader("📝 2. t検定結果")
+                
+                if is_paired:
+                    test_name = "対応のあるt検定 (Paired t-test)"
+                    t_stat, p_value = stats.ttest_rel(group_a, group_b)
+                else:
+                    test_name = "Studentのt検定" if assume_equal_var else "Welchのt検定"
+                    t_stat, p_value = stats.ttest_ind(group_a, group_b, equal_var=assume_equal_var)
+                
+                st.caption(f"適用した手法: **{test_name}**")
+                
+                col1, col2 = st.columns(2)
+                col1.metric(label="t値 (t-statistic)", value=f"{t_stat:.4f}")
+                col2.metric(label="p値 (p-value)", value=f"{p_value:.4f}")
+                
+                if p_value < 0.05:
+                    st.success(f"✅ **p < 0.05** です。\n\n「{col_a_name}」と「{col_b_name}」の平均値には**統計的に有意な差がある**と言えます。")
+                else:
+                    st.info(f"➖ **p ≥ 0.05** です。\n\n「{col_a_name}」と「{col_b_name}」の平均値に**統計的な有意差は認められません**。")
+                
+                st.divider()
+
+                # ------------------------------------------
+                # 3. グラフの描画
+                # ------------------------------------------
+                st.subheader("📊 3. データの分布")
+                plot_data = pd.DataFrame({
+                    "値": list(group_a) + list(group_b),
+                    "グループ": [col_a_name] * len(group_a) + [col_b_name] * len(group_b),
+                    "ペアID": list(range(len(group_a))) + list(range(len(group_b))) # ペアごとのIDを振る
+                })
+                
+                fig, ax = plt.subplots(figsize=(7, 5))
+                
+                if is_paired:
+                    # 対応ありの場合は推移がわかるように線を引く
+                    sns.pointplot(x="グループ", y="値", hue="ペアID", data=plot_data, ax=ax, palette="dark:gray", legend=False, markers="o", linestyles="-", alpha=0.6)
+                    plt.title(f"{col_a_name}から{col_b_name}への推移（対応のあるデータ）", fontsize=14)
+                else:
+                    # 対応なしの場合は箱ひげ図＋スウォームプロット
+                    sns.boxplot(x="グループ", y="値", data=plot_data, ax=ax, palette="pastel")
+                    sns.swarmplot(x="グループ", y="値", data=plot_data, ax=ax, color=".25", size=6)
+                    plt.title(f"{col_a_name}と{col_b_name}のデータのばらつき", fontsize=14)
+                
+                plt.ylabel("値")
+                plt.grid(axis='y', linestyle='--', alpha=0.7)
+                
+                st.pyplot(fig)
 
     # ==========================================
     # タブ2: 用語・理論の解説
     # ==========================================
     with tab2:
-        st.header("📖 統計用語と検定の選び方")
+        st.subheader("📖 t検定の基礎知識")
+        st.write("""
+        #### 1. 「対応のあるデータ」と「対応のないデータ」
+        t検定は、データの性質によって使う計算式が異なります。
+        * **対応のないデータ（独立2群）**: 別のグループを比較する場合（例：AクラスとBクラスのテストの点数、新品種と従来品種の収量）。
+        * **対応のあるデータ**: 全く同じ対象を2回測定して比較する場合（例：同じ患者の「薬を飲む前」と「飲んだ後」、同じ農場の「去年」と「今年」）。ペアごとの「差」に注目して検定を行います。
         
-        st.subheader("1. 両側検定と片側検定の違い")
-        st.markdown("""
-        * **両側検定 (Two-sided):** 2つのグループ間に**「何らかの差があるか（A ≠ B）」**を確かめます。どちらが大きいかは事前に想定しません。**基本的には両側検定を使用します。**
-        * **片側検定 (One-sided):** 「AはBより大きい（A > B）」または「小さい（A < B）」という、**方向性を限定した仮説**を確かめます。物理的な制約や強い理論的背景がある場合のみ使用します。安易に「p値を小さくしたいから」という理由で片側検定を選ぶのは不適切です。
-        """)
-
-        st.divider()
-
-        st.subheader("2. スチューデントとウェルチのt検定の違い")
-        st.markdown("""
-        * **スチューデントのt検定:** 2つのグループの**「ばらつき（分散）が等しい」**という前提（等分散性）が必要です。
-        * **ウェルチのt検定:** 2つのグループの**「ばらつき（分散）が異なっていても使える」**手法です。等分散の場合でもスチューデントとほぼ同じ結果になるため、**現代の統計学では、基本的に常に「ウェルチのt検定」を使用することが推奨されています。**
-        """)
-
-        st.divider()
-
-        st.subheader("3. t検定とF検定の違い")
-        st.markdown("""
-        * **t検定:** 2つのグループの**「平均値」**に差があるかを比較する検定です。（例：A組とB組のテストの平均点に差はあるか？）
-        * **F検定:** 2つのグループの**「分散（ばらつき）」**に差があるかを比較する検定です。（例：A組とB組で、点数のばらつき具合に差はあるか？）
-        """)
+        #### 2. Welchのt検定とStudentのt検定（対応なしの場合）
+        * **Student（スチューデント）のt検定**: 2つのグループのデータのばらつき（分散）が「等しい」という前提のもとで行う検定です。
+        * **Welch（ウェルチ）のt検定**: 2つのグループのばらつきが「等しくなくても」正確に計算できる検定です。
         
-        st.info("""
-        **💡 補足（事前検定の罠）：**
-        昔は「まずF検定をして、等分散ならスチューデント、不等分散ならウェルチのt検定を行う」という2段階の手順（事前検定）が教えられていましたが、現在はこの方法は**推奨されていません**（多重性の問題によりエラー率が上がるため）。最初からウェルチのt検定を使用するのがベストプラクティスです。
+        #### 3. 等分散性の検定とは？
+        「Studentのt検定」を行う前に、「本当に2つのグループのばらつきは同じと言えるのか？」を確認するための検定です。本アプリでは**Levene（ルビーン）検定**を採用しています。
+        * **p値が0.05未満**: ばらつきに差がある（非等分散） ➡ **Welchのt検定**を使うべき
+        * **p値が0.05以上**: ばらつきに差がない（等分散） ➡ **Studentのt検定**を使ってもよい
+        
+        **⚠️ 注意点（現代のベストプラクティス）**
+        かつては「等分散検定をしてからt検定を選ぶ」のが主流でしたが、現在では「2段階検定を行うと結果的にエラー確率が上がってしまう」ため、**事前の等分散検定は行わず、最初からWelchのt検定を無条件で使用する**ことが世界の統計学の標準となっています。
         """)
 
     # ==========================================
-    # タブ3: Excelでの計算方法 (T.TEST関数)
+    # タブ3: Excelでの計算方法
     # ==========================================
     with tab3:
-        st.header("📗 Excelでのt検定 (T.TEST関数)")
-        st.markdown("""
-        Excel上ですぐにp値（有意確率）を出したい場合は、**`T.TEST`関数**を使うのが最も簡単です。
-
-        ### 💡 T.TEST関数の基本構文
-        任意のセルに以下のように入力します。
-        """)
+        st.subheader("📗 Excelでの計算方法")
+        st.write("""
+        ### 1. 等分散性の検定 (F検定) ※対応なしの場合のみ
+        ExcelではLevene検定の代わりに、より簡易的なF検定関数が用意されています。
         
-        st.code("=T.TEST(配列1, 配列2, 尾部, 検定の種類)", language="excel")
+        `=F.TEST(配列1, 配列2)`
         
-        st.markdown("""
-        #### 引数の説明
-        * **配列1, 配列2:** 比較したい2つのデータ範囲（例: `A2:A11`, `B2:B11`）
-        * **尾部 (両側か片側か):** * `1` : 片側検定
-            * **`2` : 両側検定（基本はこちらを使用）**
-        * **検定の種類 (スチューデントかウェルチか):**
-            * `1` : 対応のあるt検定
-            * `2` : スチューデントのt検定（等分散を仮定）
-            * **`3` : ウェルチのt検定（非等分散・推奨）**
-
-        ---
-        ### 📝 実践的な入力例
-        データがA2〜A11、B2〜B11に入力されていると仮定した場合の例です。
-
-        **① 両側検定 × ウェルチのt検定（最も標準的で推奨）**
-        """)
-        st.code("=T.TEST(A2:A11, B2:B11, 2, 3)", language="excel")
-
-        st.markdown("**② 両側検定 × スチューデントのt検定**")
-        st.code("=T.TEST(A2:A11, B2:B11, 2, 2)", language="excel")
-
-        st.markdown("**③ 片側検定 × ウェルチのt検定**")
-        st.code("=T.TEST(A2:A11, B2:B11, 1, 3)", language="excel")
-
-        st.info("""
-        **✅ 判定の目安:**
-        関数の結果として表示される数値がそのまま **p値** になります。
-        この値が `0.05` 未満であれば、「有意水準5%で有意差あり」と判断します。
+        * 結果（p値）が 0.05 未満なら「非等分散」、0.05 以上なら「等分散」と判定します。
+        
+        ### 2. t検定
+        使用する関数は **`T.TEST`** 関数です。
+        
+        `=T.TEST(配列1, 配列2, 尾部, 検定の種類)`
+        
+        1. **配列1 / 配列2**: 比較したいデータの範囲
+        2. **尾部**: 基本的に **`2`**（両側検定）を指定
+        3. **検定の種類**: これが重要です！
+           * **`1`** を指定 ➡ **対応のあるt検定**
+           * **`2`** を指定 ➡ **Studentのt検定** (対応なし・等分散)
+           * **`3`** を指定 ➡ **Welchのt検定** (対応なし・非等分散) ※対応なしの場合はこれを推奨
         """)
 
 if __name__ == "__main__":
